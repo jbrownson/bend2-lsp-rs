@@ -789,6 +789,34 @@ impl WorkspaceDb {
         Some(SourceGraph { root, nodes })
     }
 
+    /// The file whose compiler check covers `root`. A `LAWS.bend` only states
+    /// laws, and the sibling `PROOF.bend` that imports it proves them, so it
+    /// is checked through that proof. Checked alone, every law is open.
+    pub(crate) fn check_root(&self, root: FileId) -> FileId {
+        self.law_proof(root).unwrap_or(root)
+    }
+
+    fn law_proof(&self, laws: FileId) -> Option<FileId> {
+        let path = self.entries.get(laws.0)?.path.as_deref()?;
+        if path.file_name()? != "LAWS.bend" {
+            return None;
+        }
+        let proof = self.file_id_by_path(&path.with_file_name("PROOF.bend"))?;
+        let entry = self.entries.get(proof.0)?;
+        (self.reachable.contains(&proof)
+            && entry.snapshot().is_some()
+            && entry.imports.iter().any(|edge| edge.target == laws))
+        .then_some(proof)
+    }
+
+    fn sibling_laws(&self, proof: FileId) -> Option<FileId> {
+        let path = self.entries.get(proof.0)?.path.as_deref()?;
+        if path.file_name()? != "PROOF.bend" {
+            return None;
+        }
+        self.file_id_by_path(&path.with_file_name("LAWS.bend"))
+    }
+
     pub fn set_open_document(&mut self, document: Document, path: Option<PathBuf>) -> FileId {
         let imports = path.as_deref().map_or_else(Vec::new, |path| {
             resolve_import_targets(path, &document.snapshot)
@@ -1103,6 +1131,22 @@ impl WorkspaceDb {
 
     #[must_use]
     pub fn dependents(&self, changed: FileId) -> Vec<Document> {
+        let mut documents = self.import_dependents(changed);
+        // A LAWS.bend is checked through its sibling PROOF.bend when the proof
+        // imports it, so editing the proof can change the law check, including
+        // whether the proof covers the laws at all.
+        if let Some(laws) = self.sibling_laws(changed)
+            && let Some(document) = self.entries[laws.0].document()
+            && !documents
+                .iter()
+                .any(|existing| existing.uri == document.uri)
+        {
+            documents.push(document);
+        }
+        documents
+    }
+
+    fn import_dependents(&self, changed: FileId) -> Vec<Document> {
         if !self.reachable.contains(&changed) {
             return Vec::new();
         }

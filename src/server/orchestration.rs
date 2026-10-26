@@ -752,7 +752,7 @@ impl Backend {
                     let database = workspace_db.read();
                     let root = database.file_id_by_uri(&uri)?;
                     tracing::Span::current().record("file_id", tracing::field::debug(&root));
-                    database.source_graph(root)
+                    database.source_graph(database.check_root(root))
                 })
             })
             .await,

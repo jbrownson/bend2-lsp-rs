@@ -344,4 +344,75 @@ mod compiler {
         );
         client.finish();
     }
+
+    // A LAWS.bend states laws; the sibling PROOF.bend that imports it proves
+    // them. This replay passes the proof and, like Bend, leaves every law
+    // open in a check of the laws alone.
+    const LAWS: &str = "law claim:\n  {0 == 0 : U32}\n";
+    const PROOF: &str = "import ./LAWS.bend as Laws\n\ndef Laws.claim():\n  {==}\n";
+    const LAWS_ALONE: &str = "1 TODO found.\nThe code is incomplete, and not a valid proof yet.";
+    const PROVEN_BY_PROOF: &str = "case \"$1\" in\n*/PROOF.bend) exit 0;;\nesac\nprintf 'Error: 1 TODO found.\\nThe code is incomplete, and not a valid proof yet.\\n' >&2\nexit 1";
+
+    #[test]
+    fn laws_are_checked_through_the_proof_that_imports_them() {
+        let (directory, mut client) = compatible(
+            PROVEN_BY_PROOF,
+            &[("LAWS.bend", LAWS), ("PROOF.bend", PROOF)],
+        );
+        let laws = uri(&directory.path().join("LAWS.bend"));
+        open(&mut client, &laws, LAWS);
+        assert!(
+            diagnostics(&mut client, &laws, Some(1)).is_empty(),
+            "the proof's check covers the laws"
+        );
+        client.finish();
+    }
+
+    #[test]
+    fn laws_without_an_importing_proof_are_checked_alone() {
+        let (directory, mut client) = compatible(
+            PROVEN_BY_PROOF,
+            &[
+                ("LAWS.bend", LAWS),
+                ("PROOF.bend", "def unrelated: U32\n  0\n"),
+            ],
+        );
+        let laws = uri(&directory.path().join("LAWS.bend"));
+        open(&mut client, &laws, LAWS);
+        let items = diagnostics(&mut client, &laws, Some(1));
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["message"], LAWS_ALONE);
+        client.finish();
+    }
+
+    #[test]
+    fn editing_the_proof_rechecks_its_laws() {
+        let (directory, mut client) = compatible(
+            PROVEN_BY_PROOF,
+            &[("LAWS.bend", LAWS), ("PROOF.bend", PROOF)],
+        );
+        let laws = uri(&directory.path().join("LAWS.bend"));
+        let proof = uri(&directory.path().join("PROOF.bend"));
+        open(&mut client, &laws, LAWS);
+        assert!(diagnostics(&mut client, &laws, Some(1)).is_empty());
+        open(&mut client, &proof, PROOF);
+        assert!(diagnostics(&mut client, &proof, Some(1)).is_empty());
+        client.notify("textDocument/didChange", json!({
+            "textDocument":{"uri":proof,"version":2},"contentChanges":[{"text":"def unrelated: U32\n  0\n"}]
+        }));
+        let message = client
+            .receive_matching(Duration::from_secs(10), |message| {
+                message["method"] == "textDocument/publishDiagnostics"
+                    && message["params"]["uri"] == laws
+                    && message["params"]["diagnostics"]
+                        .as_array()
+                        .is_some_and(|items| !items.is_empty())
+            })
+            .must_be("recheck the laws after their proof changes");
+        assert_eq!(
+            message["params"]["diagnostics"][0]["message"], LAWS_ALONE,
+            "a proof that stops importing the laws no longer covers them"
+        );
+        client.finish();
+    }
 }

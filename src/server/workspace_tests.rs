@@ -460,4 +460,94 @@ mod tests {
         assert!(!generated_path.exists());
         Ok(())
     }
+
+    #[test]
+    fn laws_are_checked_through_a_sibling_proof_that_imports_them() -> std::io::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let laws_path = temp.path().join("LAWS.bend");
+        let proof_path = temp.path().join("PROOF.bend");
+        let laws_text = "law claim:\n  {0 == 0 : U32}\n";
+        let proof_text = "import ./LAWS.bend as Laws\n\ndef Laws.claim():\n  {==}\n";
+        fs::write(&laws_path, laws_text)?;
+        let mut database = WorkspaceDb::default();
+        let laws_uri = file_uri(&laws_path)?;
+        let laws = database.set_open_document(
+            Document::new(
+                laws_uri.clone(),
+                "bend".into(),
+                Revision(1),
+                laws_text.into(),
+            ),
+            Some(laws_path.clone()),
+        );
+        database.load_reachable(std::slice::from_ref(&laws));
+        assert_eq!(
+            database.check_root(laws),
+            laws,
+            "without a proof, laws check alone"
+        );
+
+        let proof_uri = file_uri(&proof_path)?;
+        let proof = database.set_open_document(
+            Document::new(
+                proof_uri.clone(),
+                "bend".into(),
+                Revision(1),
+                proof_text.into(),
+            ),
+            Some(proof_path.clone()),
+        );
+        database.load_reachable(&[laws, proof]);
+        assert_eq!(database.check_root(laws), proof);
+        assert_eq!(database.check_root(proof), proof);
+        let graph = database
+            .source_graph(database.check_root(laws))
+            .ok_or_else(|| std::io::Error::other("proof source graph"))?;
+        assert_eq!(graph.root, proof);
+        assert!(
+            graph.nodes.iter().any(|node| node.id == laws
+                && node
+                    .snapshot
+                    .as_ref()
+                    .is_some_and(|snapshot| snapshot.text == laws_text)),
+            "the proof's check includes the open laws"
+        );
+        let dependents: Vec<Url> = database
+            .dependents(proof)
+            .into_iter()
+            .map(|document| document.uri)
+            .collect();
+        assert_eq!(
+            dependents,
+            vec![laws_uri.clone()],
+            "a proof edit rechecks its laws"
+        );
+
+        database.set_open_document(
+            Document::new(
+                proof_uri,
+                "bend".into(),
+                Revision(2),
+                "def unrelated: U32\n  0\n".into(),
+            ),
+            Some(proof_path),
+        );
+        database.load_reachable(&[laws, proof]);
+        assert_eq!(
+            database.check_root(laws),
+            laws,
+            "a proof that doesn't import the laws doesn't cover them"
+        );
+        let dependents: Vec<Url> = database
+            .dependents(proof)
+            .into_iter()
+            .map(|document| document.uri)
+            .collect();
+        assert_eq!(
+            dependents,
+            vec![laws_uri],
+            "dropping the import still rechecks the laws, which now check alone"
+        );
+        Ok(())
+    }
 }

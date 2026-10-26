@@ -261,6 +261,16 @@ impl Backend {
         self.workspace.shutdown_discovery().await;
         self.compiler.reapers.wait().await;
     }
+    /// A LAWS.bend is checked through its sibling PROOF.bend, which discovery
+    /// may not have indexed yet.
+    async fn wait_for_law_proof(&self, uri: &Url) {
+        if self
+            .document_path(uri)
+            .is_some_and(|path| path.file_name().is_some_and(|name| name == "LAWS.bend"))
+        {
+            self.workspace.wait_for_discovery().await;
+        }
+    }
     pub(super) async fn run_diagnostics(&self, uri: Url, version: i32) {
         let span = tracing::Span::current();
         sleep(Duration::from_millis(250)).await;
@@ -272,6 +282,7 @@ impl Backend {
             span.record("outcome", "stale_or_unsupported");
             return;
         }
+        self.wait_for_law_proof(&uri).await;
         let context_epoch = self.diagnostics.context_epoch.load(Ordering::SeqCst);
         let mut context = None;
         let Some(mut diagnostics) = self.lexical_errors(doc.clone(), span.clone()).await else {
@@ -282,11 +293,17 @@ impl Backend {
         if let Some(path) = self.document_path(&uri)
             && let Some(source_graph) = self.compiler_source_graph(uri.clone()).await
         {
-            let root_matches = source_graph
-                .root_node()
-                .and_then(|root| root.snapshot.as_ref())
+            // The graph is rooted at the file whose check covers this
+            // document: usually the document itself, but a LAWS.bend is
+            // checked through the PROOF.bend that proves it.
+            let root_path = normalize_path(&path);
+            let document_matches = source_graph
+                .nodes
+                .iter()
+                .find(|node| node.path == root_path)
+                .and_then(|node| node.snapshot.as_ref())
                 .is_some_and(|snapshot| Arc::ptr_eq(snapshot, &doc.snapshot));
-            if !root_matches {
+            if !document_matches {
                 span.record("outcome", "stale_snapshot");
                 return;
             }
@@ -309,7 +326,6 @@ impl Backend {
                     span.record("outcome", "stale_revision");
                     return;
                 }
-                let root_path = normalize_path(&path);
                 for (source_path, item) in compiler {
                     if normalize_path(&source_path) == root_path {
                         diagnostics.push(item);
